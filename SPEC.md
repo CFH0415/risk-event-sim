@@ -1,22 +1,23 @@
-# Risk Event Simulation — 資料規格 (SPEC)
+# Risk Event Simulation — Specification
 
-> 模擬一個美國信用卡的 **risk event**，讓你從「找出受影響帳戶 → 查 root cause → 算 remediation 金額 → 產出修復名單 → 驗證」完整跑一遍。
-> 業務知識邊做邊學：每張表、每個欄位都附「業務意義」。
+> A simulated US credit card **risk event**. The goal is to run the full remediation workflow end to end:
+> **identify impacted accounts → confirm root cause → calculate remediation → produce the remediation file → validate.**
+> Every table and column below includes its business meaning.
 
 ---
 
-## 0. 怎麼開始
+## 0. How to Use This Spec
 
-| 步驟 | 做什麼 |
+| Step | What to do |
 |---|---|
-| 1 | 讀第 1–3 節（事故單 + 資料模型），先在腦中畫出表格關係 |
-| 2 | 照 `WEEK1_DATABRICKS.md` 把資料載進 Databricks |
-| 3 | 第 2 週才開始「辦案」，用第 4–5 節的業務規則判斷誰被影響 |
-| 4 | 全部做完才能打開 `answer_key.zip` 對答案 |
+| 1 | Read §1–3 (incident ticket + data model) and sketch how the tables relate |
+| 2 | Load the data into Databricks (Bronze → Silver) and profile it |
+| 3 | Use the business rules in §4–5 to determine who was impacted and by how much |
+| 4 | Produce the deliverables in §6 and run every validation check |
 
 ---
 
-## 1. 事故單（Incident Ticket）
+## 1. Incident Ticket
 
 > **From:** Risk Manager, US Card Payments
 > **Priority:** High
@@ -31,207 +32,207 @@
 > 3. Propose a remediation file: who gets what amount, by which method.
 > 4. Tell us if anything else (beyond late fees) was affected.
 
-這張單故意寫得模糊，跟真實工作一樣。第 4 點是主管說的「會問 why 的 DA」要表現的地方。
+The ticket is intentionally vague, as real tickets are. Point 4 is where an analyst who asks *why* adds the most value.
 
 ---
 
-## 2. 資料模型（Domain Model）
+## 2. Data Model
 
 ```
 customers 1 ──< accounts 1 ──< statements 1 ──< fees 1 ──< fee_adjustments
                      │                │
-                     │                └── (一期帳單包含當期的 payments / purchases / fees / interest)
+                     │                └── (each statement summarizes that cycle's payments / purchases / fees / interest)
                      ├──< payments
-                     └──< transactions   (所有入帳動作的明細帳：PURCHASE / PAYMENT / FEE / INTEREST)
+                     └──< transactions   (ledger of every posted item: PURCHASE / PAYMENT / FEE / INTEREST)
 
-system_events  （跟帳戶無直接關聯；系統事故紀錄，查 root cause 用）
+system_events  (not linked to accounts; system incident log used for root cause analysis)
 ```
 
-**比喻**：`statements` 是每月的「對帳單封面」，`transactions` 是對帳單背面的「明細」。`payments` 是「收款紀錄」，記錄客戶**什麼時候付款**；`transactions` 裡的 PAYMENT 記錄錢**什麼時候入帳**。這兩個時間平常一樣，但……
+**Analogy:** `statements` is the cover page of the monthly bill; `transactions` is the itemized detail on the back. `payments` records **when the customer paid**; a `PAYMENT` row in `transactions` records **when the money was posted** to the account. On a normal day those two dates are the same, but…
 
-時間範圍：帳單結帳日落在 **2026 年 5–9 月**，每個帳戶每月一張帳單。
+Time range: statement dates fall between **May and September 2026**, one statement per account per month.
 
 ---
 
-## 3. 表格與欄位
+## 3. Tables and Columns
 
-### 3.1 `customers`（約 8,700 筆）
+### 3.1 `customers` (~8,700 rows)
 
-| 欄位 | 型別 | 業務意義 |
+| Column | Type | Business meaning |
 |---|---|---|
-| customer_id | string | 客戶 ID（一個客戶可以有多張卡） |
-| home_state | string | 居住州 |
-| fico_band | string | 信用分數區間。FICO 是美國最常用的信用分數（300–850），影響額度、利率、能拿到哪種卡 |
-| segment | string | `MAINSTREET`（一般客群）/ `UPMARKET`（高信用、高消費客群）。主管提到的 call routing 就是依這個分流 |
-| customer_since | date | 成為客戶的日期 |
+| customer_id | string | Customer ID (one customer can hold multiple cards) |
+| home_state | string | State of residence |
+| fico_band | string | Credit score band. FICO (300–850) is the most widely used US credit score; it drives credit limit, APR, and product eligibility |
+| segment | string | `MAINSTREET` (mass market) / `UPMARKET` (high credit, high spend). Used for servicing and call routing |
+| customer_since | date | Date the customer relationship began |
 
-### 3.2 `accounts`（10,000 筆）
+### 3.2 `accounts` (10,000 rows)
 
-| 欄位 | 型別 | 業務意義 |
+| Column | Type | Business meaning |
 |---|---|---|
-| account_id | string | 卡片帳戶 ID |
+| account_id | string | Card account ID |
 | customer_id | string | FK → customers |
-| product | string | 卡別。`SECURED_CARD` = 擔保卡，給信用紀錄不足的人，需先存保證金 |
-| open_date | date | 開卡日 |
-| credit_limit | number | 信用額度 |
-| purchase_apr | number | 消費年利率（0.2449 = 24.49%）。APR = Annual Percentage Rate |
-| statement_cycle_day | int | 每月結帳日（1–28）。每個人的帳單週期不同 |
-| autopay_enrolled | bool | 是否設定自動扣款（在到期日當天扣） |
+| product | string | Card product. `SECURED_CARD` = secured card for thin or rebuilding credit; requires a security deposit |
+| open_date | date | Account open date |
+| credit_limit | number | Credit limit |
+| purchase_apr | number | Purchase APR (0.2449 = 24.49%). APR = Annual Percentage Rate |
+| statement_cycle_day | int | Day of month the statement closes (1–28); cycles differ by account |
+| autopay_enrolled | bool | Enrolled in AutoPay (debited on the due date) |
 | account_status | string | `OPEN` / `CLOSED` |
-| closed_date | date | 關戶日 |
+| closed_date | date | Account close date |
 
-### 3.3 `statements`（50,000 筆 = 10,000 帳戶 × 5 期）
+### 3.3 `statements` (50,000 rows = 10,000 accounts × 5 cycles)
 
-| 欄位 | 業務意義 |
+| Column | Business meaning |
 |---|---|
-| statement_id | 帳單 ID |
-| cycle_start_date / statement_date | 這期帳單週期的開始／結帳日 |
-| days_in_cycle | 週期天數（算利息用） |
-| due_date | **繳款到期日** = 結帳日 + 25 天 |
-| previous_balance | 上期餘額 |
-| payments | 本期入帳的還款 |
-| credits_adjustments | 本期的調整（例如客服退的費用） |
-| purchases | 本期消費 |
-| fees_charged | 本期收的費用（這裡只有 late fee） |
-| interest_charged | 本期收的利息 |
-| avg_daily_balance | 平均每日餘額（Average Daily Balance, ADB），利息的計算基礎 |
-| new_balance | 本期餘額 = previous − payments − credits + purchases + fees + interest |
-| minimum_due | 本期最低應繳 |
+| statement_id | Statement ID |
+| cycle_start_date / statement_date | Start and close date of the billing cycle |
+| days_in_cycle | Number of days in the cycle (used for interest) |
+| due_date | **Payment due date** = statement date + 25 days |
+| previous_balance | Balance carried from the prior statement |
+| payments | Payments posted during the cycle |
+| credits_adjustments | Credits posted during the cycle (e.g., fee waivers by agents) |
+| purchases | Purchases posted during the cycle |
+| fees_charged | Fees assessed during the cycle (late fees only in this dataset) |
+| interest_charged | Interest charged for the cycle |
+| avg_daily_balance | Average Daily Balance (ADB), the basis for interest |
+| new_balance | previous − payments − credits + purchases + fees + interest |
+| minimum_due | Minimum payment due |
 
 ### 3.4 `payments`
 
-| 欄位 | 業務意義 |
+| Column | Business meaning |
 |---|---|
-| payment_id | 付款 ID |
+| payment_id | Payment ID |
 | account_id | FK → accounts |
 | channel | `AUTOPAY` / `ONLINE` / `MOBILE` / `PHONE` |
-| amount | 付款金額 |
-| received_ts_utc | **銀行收到付款的時間（UTC 時區）** |
-| posted_date | **付款入帳到帳戶的日期** |
-| payment_status | 狀態 |
+| amount | Payment amount |
+| received_ts_utc | **Timestamp the bank received the payment (UTC)** |
+| posted_date | **Date the payment was posted to the account** |
+| payment_status | Status |
 
 ### 3.5 `fees`
 
-| 欄位 | 業務意義 |
+| Column | Business meaning |
 |---|---|
-| fee_id | 費用 ID |
-| account_id / statement_id | 屬於哪個帳戶、出現在哪期帳單 |
+| fee_id | Fee ID |
+| account_id / statement_id | Account, and the statement the fee appears on |
 | fee_type | `LATE_FEE` |
-| fee_amount | $30 或 $41（見規則） |
-| assessed_date | 收費日（到期日隔天） |
+| fee_amount | $30 or $41 (see rules) |
+| assessed_date | Date assessed (the day after the due date) |
 
 ### 3.6 `fee_adjustments`
 
-客服在客戶打電話來抱怨後，個別退費的紀錄。
+Individual fee reversals made by agents after customers called in to complain.
 
-| 欄位 | 業務意義 |
+| Column | Business meaning |
 |---|---|
-| adjustment_id | 調整 ID |
-| fee_id | 退的是哪一筆費用 |
-| account_id | 帳戶 |
-| adjustment_date | 退費日 |
-| amount | 退費金額 |
-| reason_code | `GOODWILL_WAIVER` = 客服基於客戶關係主動減免 |
-| agent_id | 處理的客服 |
+| adjustment_id | Adjustment ID |
+| fee_id | The fee that was reversed |
+| account_id | Account |
+| adjustment_date | Reversal date |
+| amount | Amount reversed |
+| reason_code | `GOODWILL_WAIVER` = discretionary waiver to preserve the relationship |
+| agent_id | Agent who processed it |
 
-### 3.7 `transactions`（約 55 萬筆）
+### 3.7 `transactions` (~555,000 rows)
 
-| 欄位 | 業務意義 |
+| Column | Business meaning |
 |---|---|
-| account_id | 帳戶 |
+| account_id | Account |
 | txn_type | `PURCHASE` / `PAYMENT` / `FEE` / `INTEREST` |
-| post_date | 入帳日 |
-| amount | 金額（PAYMENT 為負數，代表減少欠款） |
-| merchant_category | 消費類別（僅 PURCHASE） |
-| reference_id | 對應的 payment_id / fee_id / statement_id |
+| post_date | Posting date |
+| amount | Amount (PAYMENT is negative, i.e., reduces the balance owed) |
+| merchant_category | Merchant category (PURCHASE only) |
+| reference_id | Related payment_id / fee_id / statement_id |
 
 ### 3.8 `system_events`
 
-| 欄位 | 業務意義 |
+| Column | Business meaning |
 |---|---|
-| event_id | 事故 ID |
-| system_name | 出問題的系統 |
-| start_ts_utc / end_ts_utc | 事故起訖時間（UTC） |
-| description | 描述 |
-| status | 狀態 |
+| event_id | Incident ID |
+| system_name | System affected |
+| start_ts_utc / end_ts_utc | Incident start and end (UTC) |
+| description | Description |
+| status | Status |
 
 ---
 
-## 4. 業務規則（Business Rules）
+## 4. Business Rules
 
-這是「公司政策應該怎麼運作」。你的工作是比對**政策**跟**系統實際做的**有沒有落差。
+These describe how company policy **should** work. The job is to find gaps between **policy** and **what the system actually did**.
 
-| # | 規則 | 說明 |
+| # | Rule | Detail |
 |---|---|---|
-| R1 | **準時付款的定義** | 付款只要在到期日當天 **美東時間 (ET) 23:59 前收到**，就算準時。依據是「收到時間」，不是入帳時間 |
-| R2 | 正常作業 | 付款收到當天就會入帳（posted_date = 收到日期，ET） |
-| R3 | **逾期（late）** | 到期日前沒收到付款，或收到的金額 < minimum_due |
-| R4 | **Late fee** | 逾期時收取，在到期日隔天收費。過去 6 期內沒有 late fee → **$30**；有 → **$41** |
-| R5 | **Grace period（寬限期）** | 如果上期帳單的 new_balance **在到期日前全額付清**，本期就不收利息。沒付清 → 本期收利息 |
-| R6 | **利息計算（簡化版）** | `interest = round(ADB × APR / 365 × days_in_cycle, 2)`<br>`ADB = (prev_bal × d_before + (prev_bal − payment) × d_after) / days_in_cycle + purchases × 0.5`<br>`d_before` = 從週期開始到付款入帳日的天數；`d_after = days_in_cycle − d_before`。沒付款時 `d_before = days_in_cycle` |
-| R7 | Minimum due | `max($25, 1% × new_balance + 本期 fees + 本期 interest)`，但不超過 new_balance |
-| R8 | 時間儲存 | 系統時間戳記一律存 **UTC** |
+| R1 | **On-time payment** | A payment is on time if it is **received by 11:59 PM Eastern Time (ET) on the due date**. Receipt time is what counts, not posting time |
+| R2 | Normal processing | Payments post on the day they are received (posted_date = received date in ET) |
+| R3 | **Late** | No payment received by the due date, or the amount received is < minimum_due |
+| R4 | **Late fee** | Assessed the day after the due date when late. **$30** if no late fee in the prior 6 cycles; otherwise **$41** |
+| R5 | **Grace period** | If the prior statement's new_balance is **paid in full by its due date**, no interest is charged this cycle. Otherwise interest applies |
+| R6 | **Interest (simplified)** | `interest = round(ADB × APR / 365 × days_in_cycle, 2)`<br>`ADB = (prev_bal × d_before + (prev_bal − payment) × d_after) / days_in_cycle + purchases × 0.5`<br>`d_before` = days from cycle start to the payment posting date; `d_after = days_in_cycle − d_before`. With no payment, `d_before = days_in_cycle` |
+| R7 | Minimum due | `max($25, 1% × new_balance + cycle fees + cycle interest)`, capped at new_balance |
+| R8 | Timestamps | All system timestamps are stored in **UTC** |
 
-### 名詞小抄
+### Glossary
 
-| 名詞 | 白話 |
+| Term | Meaning |
 |---|---|
-| Transactor | 每月全額付清的人，通常不付利息 |
-| Revolver | 只付部分金額、讓餘額滾到下個月的人，會付利息 |
-| Grace period | 「全額付清就免息」的優惠。一旦沒全額付清就失去 |
-| DPD (Days Past Due) | 逾期天數。**逾期 30 天以上**才會回報給信用局（credit bureau） |
-| Remediation | 公司出錯後，把客戶「恢復到沒出錯時應有的狀態」 |
+| Transactor | Pays the full balance every month; typically pays no interest |
+| Revolver | Pays less than the full balance and carries the rest; pays interest |
+| Grace period | Interest-free period earned by paying in full; lost once a balance is carried |
+| DPD (Days Past Due) | Days delinquent. Accounts are reported to the credit bureaus only at **30+ DPD** |
+| Remediation | Restoring customers to the position they would have been in had the error not occurred |
 
 ---
 
-## 5. Remediation Policy（風險經理給的原則）
+## 5. Remediation Policy (from the Risk Manager)
 
-1. **Make the customer whole**：凡是「如果付款在收到當天就入帳，就不會被收」的費用或利息，都要退。
-2. 已經被客服退過的金額，**不能再退一次**。
-3. 「利息的利息」（費用被算進餘額後產生的額外利息）這次 **out of scope**。
-4. 退款方式：帳戶 `OPEN` → `STATEMENT_CREDIT`；`CLOSED` → `MAILED_CHECK`。
-5. 金額 > $0 就要退，沒有最低門檻。
+1. **Make the customer whole:** refund any fee or interest that would not have been charged if the payment had posted on the day it was received.
+2. Amounts already reversed by agents **must not be refunded again**.
+3. Interest on interest (extra interest from a fee being added to the balance) is **out of scope** for this event.
+4. Method: `OPEN` accounts → `STATEMENT_CREDIT`; `CLOSED` accounts → `MAILED_CHECK`.
+5. Refund any amount > $0; there is no minimum threshold.
 
 ---
 
-## 6. 交付物（Deliverables）
+## 6. Deliverables
 
-| # | 交付物 | 格式 |
+| # | Deliverable | Format |
 |---|---|---|
-| D1 | Root cause + 影響時間窗 | 一段文字 + 支持的查詢 |
-| D2 | 受影響帳戶名單 | 表格 `remediation_file`：account_id, fee_refund, interest_refund, remediation_total, remediation_method, harm_types |
-| D3 | Impact summary | 依 harm type 分的帳戶數、金額 |
-| D4 | 驗證報告 | 每個檢查的結果（見下方） |
-| D5 | Campaign 設定檔 | `campaign_config.json`（模擬 Fractal 的輸入） |
-| D6 | 一頁 memo | 給 risk manager 看的 |
+| D1 | Root cause + impact window | Short write-up + supporting queries |
+| D2 | Impacted account list | Table `remediation_file`: account_id, fee_refund, interest_refund, remediation_total, remediation_method, harm_types |
+| D3 | Impact summary | Accounts and $ by harm type |
+| D4 | Validation report | Result of every check below |
+| D5 | Campaign config | `campaign_config.json` (simulated input to the fulfillment platform) |
+| D6 | One-page memo | For the Risk Manager |
 
-### 必要的驗證檢查
+### Required Validation Checks
 
-- [ ] 名單裡沒有重複的 account_id
-- [ ] 沒有負數金額
-- [ ] 每個帳戶的退費 ≤ 實際被收的金額
-- [ ] 已退過的 fee 沒有被重複退
-- [ ] 每一步的帳戶數、總金額能對得上（從 impacted population → 最終名單）
-- [ ] CLOSED 帳戶都用 MAILED_CHECK
+- [ ] No duplicate account_id in the remediation file
+- [ ] No negative amounts
+- [ ] Each account's refund ≤ the amount actually charged
+- [ ] No fee already waived by an agent is refunded again
+- [ ] Account counts and totals reconcile at every step (impacted population → final file)
+- [ ] All CLOSED accounts use MAILED_CHECK
 
 ---
 
-## 7. 跟真實世界的差異（簡化）
+## 7. Simplifications vs. the Real World
 
-| 真實世界 | 這裡的簡化 |
+| Real world | Simplification here |
 |---|---|
-| 利息按每日餘額逐日計算，消費、現金預借利率不同 | 用 R6 的簡化 ADB 公式，只有一種 APR |
-| Grace period 失去後，通常要連續兩期全額付清才恢復 | 下一期全額付清就恢復 |
-| 有很多種費用（年費、海外交易費、超額費） | 只有 late fee |
-| Late fee 金額受法規（CARD Act / Reg Z）規範 | 固定 $30 / $41 |
-| 付款可能被退票（returned payment） | 沒有 |
+| Interest accrues on daily balances; purchase and cash APRs differ | Simplified ADB formula (R6) with a single APR |
+| Grace period usually requires two consecutive pay-in-full cycles to restore | Restored after one pay-in-full cycle |
+| Many fee types (annual, foreign transaction, over-limit) | Late fees only |
+| Late fee amounts are governed by regulation (CARD Act / Reg Z) | Fixed at $30 / $41 |
+| Payments can be returned | No returned payments |
 
 ---
 
-## 8. 重新產生資料
+## 8. Regenerating the Data
 
 ```bash
 python generate_data.py --accounts 10000 --seed 42 --out data
 ```
 
-換 `--seed` 可以得到一份新的資料，練第二次時用。`--accounts 100000` 可以練大資料量下的效能。
+Change `--seed` for a fresh dataset to practice again, or use `--accounts 100000` to practice performance at scale.
